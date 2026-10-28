@@ -1,58 +1,164 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
-  liveFrameUrl,
+  ICE_SERVERS,
   listLiveSessions,
+  liveWsUrl,
   type LiveSessionPublic,
+  type SignalPayload,
 } from '../../lib/live-share-api'
 
-function SessionTile({ session }: { session: LiveSessionPublic }) {
-  const [displaySrc, setDisplaySrc] = useState<string | null>(null)
-  const ageMs = Date.now() - new Date(session.updatedAt).getTime()
-  const stale = ageMs > 4000
+type ServerMsg =
+  | { type: 'joined'; sessionId: string; peerId: string; name: string }
+  | { type: 'publisher-left' }
+  | { type: 'signal'; from: string; data: SignalPayload }
+  | { type: 'error'; error: string }
+  | { type: 'pong' }
+
+function WebrtcTile({ session }: { session: LiveSessionPublic }) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const pcRef = useRef<RTCPeerConnection | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const [status, setStatus] = useState<'connecting' | 'live' | 'error'>(
+    'connecting',
+  )
+  const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!session.live) {
-      setDisplaySrc(null)
-      return
-    }
-    const url = liveFrameUrl(session.id, session.updatedAt)
-    const img = new Image()
     let cancelled = false
-    img.onload = () => {
-      if (!cancelled) setDisplaySrc(url)
+    const ws = new WebSocket(liveWsUrl())
+    wsRef.current = ws
+
+    const cleanup = () => {
+      ws.close()
+      pcRef.current?.close()
+      pcRef.current = null
+      if (videoRef.current) videoRef.current.srcObject = null
     }
-    img.onerror = () => {
-      /* keep last good frame */
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'viewer-join', sessionId: session.id }))
     }
-    img.src = url
+
+    ws.onmessage = (ev) => {
+      if (cancelled) return
+      let msg: ServerMsg
+      try {
+        msg = JSON.parse(String(ev.data)) as ServerMsg
+      } catch {
+        return
+      }
+
+      if (msg.type === 'joined') {
+        setStatus('connecting')
+      } else if (msg.type === 'publisher-left') {
+        setStatus('error')
+        setErr('Publisher stop')
+        cleanup()
+      } else if (msg.type === 'error') {
+        setStatus('error')
+        setErr(msg.error)
+      } else if (msg.type === 'signal') {
+        void (async () => {
+          const data = msg.data
+          if (data.type === 'offer') {
+            pcRef.current?.close()
+            const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+            pcRef.current = pc
+
+            pc.ontrack = (e) => {
+              const stream = e.streams[0] ?? new MediaStream([e.track])
+              if (videoRef.current) {
+                videoRef.current.srcObject = stream
+                void videoRef.current.play().catch(() => undefined)
+              }
+              setStatus('live')
+              setErr(null)
+            }
+
+            pc.onicecandidate = (iceEv) => {
+              if (ws.readyState !== WebSocket.OPEN) return
+              ws.send(
+                JSON.stringify({
+                  type: 'signal',
+                  data: {
+                    type: 'ice',
+                    candidate: iceEv.candidate
+                      ? iceEv.candidate.toJSON()
+                      : null,
+                  } satisfies SignalPayload,
+                }),
+              )
+            }
+
+            pc.onconnectionstatechange = () => {
+              if (pc.connectionState === 'failed') {
+                setStatus('error')
+                setErr('Koneksi WebRTC gagal (NAT/firewall?)')
+              }
+            }
+
+            await pc.setRemoteDescription(data.sdp)
+            const answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            ws.send(
+              JSON.stringify({
+                type: 'signal',
+                data: { type: 'answer', sdp: answer } satisfies SignalPayload,
+              }),
+            )
+          } else if (data.type === 'ice' && data.candidate && pcRef.current) {
+            try {
+              await pcRef.current.addIceCandidate(data.candidate)
+            } catch {
+              /* ignore */
+            }
+          }
+        })()
+      }
+    }
+
+    ws.onerror = () => {
+      if (!cancelled) {
+        setStatus('error')
+        setErr('WebSocket error')
+      }
+    }
+
     return () => {
       cancelled = true
+      cleanup()
     }
-  }, [session.id, session.live, session.updatedAt])
+  }, [session.id])
+
+  const ageMs = Date.now() - new Date(session.updatedAt).getTime()
+  const stale = ageMs > 15000
 
   return (
     <article className="overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel)]">
       <div className="relative aspect-[3/4] bg-black sm:aspect-video">
-        {displaySrc ? (
-          <img
-            src={displaySrc}
-            alt={`Share ${session.name}`}
-            className="h-full w-full object-cover"
-            decoding="async"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center text-sm text-[var(--muted)]">
-            Menunggu frame…
+        <video
+          ref={videoRef}
+          className="h-full w-full object-cover"
+          playsInline
+          autoPlay
+          muted
+        />
+        {status !== 'live' ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50 px-3 text-center text-sm text-[var(--muted)]">
+            {status === 'connecting' ? 'Menyambung WebRTC…' : err || 'Error'}
           </div>
-        )}
+        ) : null}
         <div className="absolute left-2 top-2 rounded border border-[var(--accent)]/40 bg-black/70 px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--accent)]">
-          {stale ? 'Stale' : 'Live'}
+          {status === 'live' && !stale ? 'Live 30fps' : status === 'live' ? 'Stale' : '…'}
         </div>
       </div>
       <div className="px-3 py-2">
         <p className="text-sm font-medium">{session.name}</p>
         <p className="text-xs text-[var(--muted)]">
-          Update {new Date(session.updatedAt).toLocaleTimeString('id-ID')}
+          WebRTC
+          {typeof session.viewers === 'number'
+            ? ` · ${session.viewers} penonton`
+            : ''}
         </p>
       </div>
     </article>
@@ -69,7 +175,7 @@ export function ShareViewerGrid() {
       try {
         const list = await listLiveSessions()
         if (!cancelled) {
-          setSessions(list)
+          setSessions(list.filter((s) => s.live && s.mode !== 'jpeg'))
           setError(null)
         }
       } catch (err) {
@@ -79,7 +185,7 @@ export function ShareViewerGrid() {
       }
     }
     void tick()
-    const id = window.setInterval(() => void tick(), 400)
+    const id = window.setInterval(() => void tick(), 2000)
     return () => {
       cancelled = true
       window.clearInterval(id)
@@ -91,7 +197,7 @@ export function ShareViewerGrid() {
       <div>
         <h2 className="font-medium">Yang lagi share sekarang</h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Feed dari HP peserta demo. Refresh ~2–3×/detik.
+          Video peer-to-peer WebRTC (~30 fps). Bukan slideshow JPEG.
         </p>
       </div>
       {error ? (
@@ -105,7 +211,7 @@ export function ShareViewerGrid() {
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {sessions.map((s) => (
-            <SessionTile key={s.id} session={s} />
+            <WebrtcTile key={s.id} session={s} />
           ))}
         </div>
       )}

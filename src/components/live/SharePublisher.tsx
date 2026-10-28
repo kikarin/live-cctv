@@ -1,29 +1,33 @@
-import { Camera, StopCircle, SwitchCamera } from 'lucide-react'
+import { Camera, StopCircle, SwitchCamera, Users } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  joinLiveSession,
-  leaveLiveSession,
-  publishLiveFrameBlob,
+  ICE_SERVERS,
+  liveWsUrl,
+  tuneVideoSender,
+  type SignalPayload,
 } from '../../lib/live-share-api'
 
-/** ~3 fps — cukup smooth untuk demo, tidak numpuk antrean upload */
-const FRAME_MS = 350
-const MAX_W = 640
-const JPEG_QUALITY = 0.55
+type ServerMsg =
+  | { type: 'ready'; sessionId: string; peerId: string; name: string }
+  | { type: 'viewer-joined'; viewerId: string }
+  | { type: 'viewer-left'; viewerId: string }
+  | { type: 'signal'; from: string; data: SignalPayload }
+  | { type: 'pong' }
+  | { type: 'error'; error: string }
 
 export function SharePublisher() {
   const videoRef = useRef<HTMLVideoElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const timerRef = useRef<number | null>(null)
-  const sessionRef = useRef<{ id: string; token: string } | null>(null)
-  const inFlightRef = useRef(false)
+  const wsRef = useRef<WebSocket | null>(null)
+  const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map())
+  const pingRef = useRef<number | null>(null)
 
   const [name, setName] = useState('')
   const [sharing, setSharing] = useState(false)
   const [facing, setFacing] = useState<'user' | 'environment'>('environment')
   const [error, setError] = useState<string | null>(null)
-  const [sent, setSent] = useState(0)
+  const [viewers, setViewers] = useState(0)
+  const [sessionId, setSessionId] = useState<string | null>(null)
 
   const stopTracks = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -31,28 +35,35 @@ export function SharePublisher() {
     if (videoRef.current) videoRef.current.srcObject = null
   }, [])
 
-  const stopSharing = useCallback(async () => {
-    if (timerRef.current) {
-      window.clearInterval(timerRef.current)
-      timerRef.current = null
+  const closePeers = useCallback(() => {
+    for (const pc of peersRef.current.values()) {
+      pc.close()
     }
-    const session = sessionRef.current
-    sessionRef.current = null
-    inFlightRef.current = false
+    peersRef.current.clear()
+    setViewers(0)
+  }, [])
+
+  const stopSharing = useCallback(() => {
+    if (pingRef.current) {
+      window.clearInterval(pingRef.current)
+      pingRef.current = null
+    }
+    try {
+      wsRef.current?.send(JSON.stringify({ type: 'leave' }))
+    } catch {
+      /* ignore */
+    }
+    wsRef.current?.close()
+    wsRef.current = null
+    closePeers()
     stopTracks()
     setSharing(false)
-    if (session) {
-      try {
-        await leaveLiveSession(session.id, session.token)
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [stopTracks])
+    setSessionId(null)
+  }, [closePeers, stopTracks])
 
   useEffect(() => {
     return () => {
-      void stopSharing()
+      stopSharing()
     }
   }, [stopSharing])
 
@@ -65,6 +76,7 @@ export function SharePublisher() {
           facingMode: { ideal: mode },
           width: { ideal: 1280 },
           height: { ideal: 720 },
+          frameRate: { ideal: 30, max: 30 },
         },
       })
       streamRef.current = stream
@@ -72,50 +84,92 @@ export function SharePublisher() {
         videoRef.current.srcObject = stream
         await videoRef.current.play().catch(() => undefined)
       }
+      // Update tracks on existing peers (flip camera)
+      for (const pc of peersRef.current.values()) {
+        const track = stream.getVideoTracks()[0]
+        const sender = pc.getSenders().find((s) => s.track?.kind === 'video')
+        if (sender && track) await sender.replaceTrack(track)
+      }
     },
     [stopTracks],
   )
 
-  const pushFrame = useCallback(() => {
-    if (inFlightRef.current) return
-    const session = sessionRef.current
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    if (!session || !video || !canvas || video.readyState < 2) return
+  const createPeerForViewer = useCallback(async (viewerId: string) => {
+    const stream = streamRef.current
+    const ws = wsRef.current
+    if (!stream || !ws || ws.readyState !== WebSocket.OPEN) return
 
-    const vw = video.videoWidth || 640
-    const vh = video.videoHeight || 360
-    const scale = Math.min(1, MAX_W / vw)
-    canvas.width = Math.round(vw * scale)
-    canvas.height = Math.round(vh * scale)
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+    const existing = peersRef.current.get(viewerId)
+    if (existing) {
+      existing.close()
+      peersRef.current.delete(viewerId)
+    }
 
-    inFlightRef.current = true
-    canvas.toBlob(
-      (blob) => {
-        if (!blob || !sessionRef.current) {
-          inFlightRef.current = false
-          return
-        }
-        const { id, token } = sessionRef.current
-        void publishLiveFrameBlob(id, token, blob)
-          .then(() => {
-            setSent((n) => n + 1)
-            setError(null)
-          })
-          .catch((err) => {
-            setError(err instanceof Error ? err.message : 'Gagal kirim frame')
-          })
-          .finally(() => {
-            inFlightRef.current = false
-          })
-      },
-      'image/jpeg',
-      JPEG_QUALITY,
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+    peersRef.current.set(viewerId, pc)
+    setViewers(peersRef.current.size)
+
+    for (const track of stream.getTracks()) {
+      pc.addTrack(track, stream)
+    }
+    await tuneVideoSender(pc)
+
+    pc.onicecandidate = (ev) => {
+      if (ws.readyState !== WebSocket.OPEN) return
+      ws.send(
+        JSON.stringify({
+          type: 'signal',
+          to: viewerId,
+          data: {
+            type: 'ice',
+            candidate: ev.candidate ? ev.candidate.toJSON() : null,
+          } satisfies SignalPayload,
+        }),
+      )
+    }
+
+    pc.onconnectionstatechange = () => {
+      if (
+        pc.connectionState === 'failed' ||
+        pc.connectionState === 'closed' ||
+        pc.connectionState === 'disconnected'
+      ) {
+        pc.close()
+        peersRef.current.delete(viewerId)
+        setViewers(peersRef.current.size)
+      }
+    }
+
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: false,
+      offerToReceiveVideo: false,
+    })
+    await pc.setLocalDescription(offer)
+    ws.send(
+      JSON.stringify({
+        type: 'signal',
+        to: viewerId,
+        data: { type: 'offer', sdp: offer } satisfies SignalPayload,
+      }),
     )
   }, [])
+
+  const onSignal = useCallback(
+    async (from: string, data: SignalPayload) => {
+      const pc = peersRef.current.get(from)
+      if (!pc) return
+      if (data.type === 'answer') {
+        await pc.setRemoteDescription(data.sdp)
+      } else if (data.type === 'ice' && data.candidate) {
+        try {
+          await pc.addIceCandidate(data.candidate)
+        } catch {
+          /* ignore late ice */
+        }
+      }
+    },
+    [],
+  )
 
   const startSharing = async () => {
     setError(null)
@@ -124,19 +178,73 @@ export function SharePublisher() {
       return
     }
     try {
-      const session = await joinLiveSession(name.trim() || 'Mahasiswa')
-      sessionRef.current = session
       await startCamera(facing)
-      setSharing(true)
-      setSent(0)
-      timerRef.current = window.setInterval(() => {
-        pushFrame()
-      }, FRAME_MS)
-      pushFrame()
+
+      const ws = new WebSocket(liveWsUrl())
+      wsRef.current = ws
+
+      await new Promise<void>((resolve, reject) => {
+        const t = window.setTimeout(
+          () => reject(new Error('WebSocket timeout')),
+          8000,
+        )
+        ws.onopen = () => {
+          window.clearTimeout(t)
+          resolve()
+        }
+        ws.onerror = () => {
+          window.clearTimeout(t)
+          reject(new Error('WebSocket gagal — pastikan API jalan'))
+        }
+      })
+
+      ws.onmessage = (ev) => {
+        let msg: ServerMsg
+        try {
+          msg = JSON.parse(String(ev.data)) as ServerMsg
+        } catch {
+          return
+        }
+        if (msg.type === 'ready') {
+          setSessionId(msg.sessionId)
+          setSharing(true)
+        } else if (msg.type === 'viewer-joined') {
+          void createPeerForViewer(msg.viewerId)
+        } else if (msg.type === 'viewer-left') {
+          const pc = peersRef.current.get(msg.viewerId)
+          pc?.close()
+          peersRef.current.delete(msg.viewerId)
+          setViewers(peersRef.current.size)
+        } else if (msg.type === 'signal') {
+          void onSignal(msg.from, msg.data)
+        } else if (msg.type === 'error') {
+          setError(msg.error)
+        }
+      }
+
+      ws.onclose = () => {
+        if (wsRef.current === ws) {
+          closePeers()
+          stopTracks()
+          setSharing(false)
+          setSessionId(null)
+        }
+      }
+
+      ws.send(
+        JSON.stringify({
+          type: 'publisher-start',
+          name: name.trim() || 'Mahasiswa',
+        }),
+      )
+
+      pingRef.current = window.setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }))
+        }
+      }, 10000)
     } catch (err) {
-      sessionRef.current = null
-      stopTracks()
-      setSharing(false)
+      stopSharing()
       setError(err instanceof Error ? err.message : 'Gagal mulai share')
     }
   }
@@ -157,8 +265,8 @@ export function SharePublisher() {
       <div>
         <h2 className="font-medium">Bagikan dari HP kamu</h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Arahkan kamera ke lokasi demo. Frame JPEG dikirim ~3×/detik ke HI
-          VISION supaya penonton lihat hampir real-time.
+          Stream WebRTC ~30 fps ke penonton (bukan potongan JPEG). Butuh API +
+          jaringan yang mengizinkan peer connection (STUN).
         </p>
       </div>
 
@@ -188,7 +296,6 @@ export function SharePublisher() {
           </div>
         ) : null}
       </div>
-      <canvas ref={canvasRef} className="hidden" />
 
       {error ? (
         <p className="text-sm text-[var(--error)]" role="alert">
@@ -196,8 +303,12 @@ export function SharePublisher() {
         </p>
       ) : null}
       {sharing ? (
-        <p className="text-xs text-[var(--accent)]">
-          Live · {sent} frame terkirim
+        <p className="flex flex-wrap items-center gap-3 text-xs text-[var(--accent)]">
+          <span>Live WebRTC{sessionId ? ` · ${sessionId.slice(0, 6)}` : ''}</span>
+          <span className="inline-flex items-center gap-1">
+            <Users size={12} aria-hidden />
+            {viewers} penonton
+          </span>
         </p>
       ) : null}
 
@@ -215,7 +326,7 @@ export function SharePublisher() {
           <>
             <button
               type="button"
-              onClick={() => void stopSharing()}
+              onClick={() => stopSharing()}
               className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-[var(--error)]/40 bg-[var(--error)]/10 px-4 py-3 text-sm text-[var(--error)]"
             >
               <StopCircle size={18} aria-hidden />

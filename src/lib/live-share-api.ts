@@ -5,7 +5,14 @@ export type LiveSessionPublic = {
   name: string
   updatedAt: string
   live: boolean
+  mode?: 'webrtc' | 'jpeg'
+  viewers?: number
 }
+
+export const ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+]
 
 async function parseJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -25,48 +32,36 @@ export async function listLiveSessions(
   return data.sessions
 }
 
-export async function joinLiveSession(name: string): Promise<{
-  id: string
-  token: string
-}> {
-  const res = await fetch(`${apiBase()}/api/live/join`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  })
-  return parseJson(res)
+/** WebSocket signaling URL (same-origin via Vite proxy, atau VITE_API_URL). */
+export function liveWsUrl(): string {
+  const base = apiBase().trim()
+  if (base) {
+    const u = new URL(base)
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
+    u.pathname = '/api/live/ws'
+    u.search = ''
+    u.hash = ''
+    return u.toString()
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/api/live/ws`
 }
 
-/** URL binary JPEG — browser decode langsung via <img>. */
-export function liveFrameUrl(id: string, updatedAt: string): string {
-  return `${apiBase()}/api/live/${id}/frame?v=${encodeURIComponent(updatedAt)}`
-}
+export type SignalPayload =
+  | { type: 'offer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'answer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'ice'; candidate: RTCIceCandidateInit | null }
 
-/** Kirim JPEG binary (lebih ringan dari JSON base64). */
-export async function publishLiveFrameBlob(
-  id: string,
-  token: string,
-  blob: Blob,
-): Promise<void> {
-  const res = await fetch(`${apiBase()}/api/live/${id}/frame`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'image/jpeg',
-      'X-Live-Token': token,
-    },
-    body: blob,
-  })
-  await parseJson(res)
-}
-
-export async function leaveLiveSession(
-  id: string,
-  token: string,
-): Promise<void> {
-  const res = await fetch(`${apiBase()}/api/live/${id}`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
-  })
-  await parseJson(res)
+export async function tuneVideoSender(pc: RTCPeerConnection) {
+  const sender = pc.getSenders().find((s) => s.track?.kind === 'video')
+  if (!sender) return
+  try {
+    const params = sender.getParameters()
+    if (!params.encodings?.length) params.encodings = [{}]
+    params.encodings[0].maxBitrate = 2_500_000
+    params.encodings[0].maxFramerate = 30
+    await sender.setParameters(params)
+  } catch {
+    /* browser may reject */
+  }
 }

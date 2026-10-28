@@ -49,7 +49,8 @@ export function LiveDemoPage() {
           </h2>
           <p className="text-sm text-[var(--muted)]">
             Kirim link ini ke grup mahasiswa. Buka di HP → izinkan kamera →
-            share. Tidak bergantung ke server CCTV pemerintah.
+            share. Stream lewat WebRTC (~30 fps), bukan potongan frame. Tidak
+            bergantung ke server CCTV pemerintah.
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <code className="max-w-full truncate rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-xs text-[var(--accent)]">

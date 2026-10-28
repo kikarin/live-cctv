@@ -1,4 +1,5 @@
 import { serve } from '@hono/node-server'
+import { createNodeWebSocket } from '@hono/node-ws'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
@@ -17,6 +18,11 @@ import {
   publishFrame,
   publishFrameBinary,
 } from './live-share.js'
+import {
+  handleWebrtcClose,
+  handleWebrtcMessage,
+  listWebrtcSessions,
+} from './live-webrtc.js'
 import { cacheGet, cacheSet, getCacheBackend, initCache } from './redis.js'
 import type { Camera } from './types.js'
 
@@ -25,6 +31,7 @@ const TTL = Number(process.env.CACHE_TTL_SECONDS ?? 60)
 const CACHE_KEY = process.env.CACHE_KEY ?? 'hi-vision:cameras:v1'
 
 const app = new Hono()
+const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app })
 
 app.use(
   '*',
@@ -191,11 +198,35 @@ app.get('/api/cameras/:id', async (c) => {
   }
 })
 
-/** Live Demo share — mahasiswa bagikan kondisi dari HP */
+/** Live Demo share — WebRTC (utama) + legacy JPEG list */
 app.get('/api/live', async (c) => {
-  const sessions = await listLiveSessions()
+  const webrtc = listWebrtcSessions()
+  const legacy = await listLiveSessions()
+  const sessions = [
+    ...webrtc,
+    ...legacy.map((s) => ({ ...s, mode: 'jpeg' as const, viewers: 0 })),
+  ]
   return c.json({ sessions })
 })
+
+app.get(
+  '/api/live/ws',
+  upgradeWebSocket(() => ({
+    onMessage(event, ws) {
+      const data =
+        typeof event.data === 'string'
+          ? event.data
+          : new TextDecoder().decode(event.data as ArrayBuffer)
+      handleWebrtcMessage(ws, data)
+    },
+    onClose(_event, ws) {
+      handleWebrtcClose(ws)
+    },
+    onError(_event, ws) {
+      handleWebrtcClose(ws)
+    },
+  })),
+)
 
 app.post('/api/live/join', async (c) => {
   const body = (await c.req.json().catch(() => null)) as { name?: string } | null
@@ -270,6 +301,8 @@ app.delete('/api/live/:id', async (c) => {
 const backend = await initCache()
 console.log(`[hi-vision-api] cache backend: ${backend}`)
 
-serve({ fetch: app.fetch, port: PORT }, (info) => {
+const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(`[hi-vision-api] http://localhost:${info.port}`)
+  console.log(`[hi-vision-api] webrtc ws: ws://localhost:${info.port}/api/live/ws`)
 })
+injectWebSocket(server)

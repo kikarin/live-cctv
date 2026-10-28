@@ -145,10 +145,11 @@ server {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-
-    # Share Demo: upload JPEG + polling
+    # WebRTC signaling (Share Demo)
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
     client_max_body_size 1m;
-    proxy_read_timeout 60s;
   }
 
   location / {
@@ -164,18 +165,19 @@ HTTP → HTTPS redirect sesuai kebiasaanmu.
 - [ ] TLS aktif (kamera HP di Share Demo **wajib HTTPS**, kecuali `localhost`)
 - [ ] Redis up; `GET /api/cameras` → `meta.backend: "redis"`
 - [ ] `GET /api/live` OK dari HP di jaringan yang sama / publik
+- [ ] WebSocket `/api/live/ws` ter-upgrade (cek Nginx `Upgrade` / `Connection`)
 - [ ] CORS: jika frontend & API beda origin, pastikan origin FE diizinkan (saat ini API memakai `origin: *` — pertimbangkan ketatkan)
 - [ ] Firewall: hanya 80/443 publik; Redis & `:8787` **jangan** expose ke internet
 - [ ] Restart policy (systemd/PM2/Docker) untuk API + Redis
-- [ ] Disk/log: frame live TTL pendek (~45s); Redis tidak menyimpan video permanen
+- [ ] Share Demo = **WebRTC P2P** (signaling lewat API). Kalau HP/viewer beda NAT ketat dan gagal connect, sediakan TURN server
 
 ## Share Demo di lapangan
 
 1. Deploy URL publik HTTPS (mis. `https://hi-vision.example.com/live`).
-2. Peserta buka tab **Bagikan** di HP (izin kamera).
-3. Monitor di tab **Tonton** / layar proyektor.
+2. Peserta buka tab **Bagikan** di HP (izin kamera) — stream ~30 fps WebRTC.
+3. Monitor di tab **Lihat share** / layar proyektor.
 
-HP dan viewer harus mengarah ke **host API yang sama** (same-origin lewat Nginx paling aman).
+HP dan viewer harus mengarah ke **host API yang sama** (same-origin lewat Nginx paling aman) supaya signaling WS jalan.
 
 ## Update rilis
 
