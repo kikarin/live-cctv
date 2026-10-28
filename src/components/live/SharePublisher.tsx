@@ -1,11 +1,11 @@
 import { Camera, StopCircle, SwitchCamera, Users } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { liveWsUrl, tuneVideoSender, type SignalPayload } from '../../lib/live-share-api'
 import {
-  ICE_SERVERS,
-  liveWsUrl,
-  tuneVideoSender,
-  type SignalPayload,
-} from '../../lib/live-share-api'
+  createPeerConnection,
+  resolveIceServers,
+  signalIce,
+} from '../../lib/webrtc'
 
 type ServerMsg =
   | { type: 'ready'; sessionId: string; peerId: string; name: string }
@@ -15,11 +15,14 @@ type ServerMsg =
   | { type: 'pong' }
   | { type: 'error'; error: string }
 
+type PeerHandle = ReturnType<typeof createPeerConnection>
+
 export function SharePublisher() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map())
+  const peersRef = useRef<Map<string, PeerHandle>>(new Map())
+  const iceServersRef = useRef<RTCIceServer[]>([])
   const pingRef = useRef<number | null>(null)
 
   const [name, setName] = useState('')
@@ -36,8 +39,8 @@ export function SharePublisher() {
   }, [])
 
   const closePeers = useCallback(() => {
-    for (const pc of peersRef.current.values()) {
-      pc.close()
+    for (const peer of peersRef.current.values()) {
+      peer.pc.close()
     }
     peersRef.current.clear()
     setViewers(0)
@@ -84,10 +87,9 @@ export function SharePublisher() {
         videoRef.current.srcObject = stream
         await videoRef.current.play().catch(() => undefined)
       }
-      // Update tracks on existing peers (flip camera)
-      for (const pc of peersRef.current.values()) {
+      for (const peer of peersRef.current.values()) {
         const track = stream.getVideoTracks()[0]
-        const sender = pc.getSenders().find((s) => s.track?.kind === 'video')
+        const sender = peer.pc.getSenders().find((s) => s.track?.kind === 'video')
         if (sender && track) await sender.replaceTrack(track)
       }
     },
@@ -101,13 +103,14 @@ export function SharePublisher() {
 
     const existing = peersRef.current.get(viewerId)
     if (existing) {
-      existing.close()
+      existing.pc.close()
       peersRef.current.delete(viewerId)
     }
 
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
-    peersRef.current.set(viewerId, pc)
+    const handle = createPeerConnection(iceServersRef.current)
+    peersRef.current.set(viewerId, handle)
     setViewers(peersRef.current.size)
+    const { pc } = handle
 
     for (const track of stream.getTracks()) {
       pc.addTrack(track, stream)
@@ -115,24 +118,13 @@ export function SharePublisher() {
     await tuneVideoSender(pc)
 
     pc.onicecandidate = (ev) => {
-      if (ws.readyState !== WebSocket.OPEN) return
-      ws.send(
-        JSON.stringify({
-          type: 'signal',
-          to: viewerId,
-          data: {
-            type: 'ice',
-            candidate: ev.candidate ? ev.candidate.toJSON() : null,
-          } satisfies SignalPayload,
-        }),
-      )
+      signalIce(ws, viewerId, ev.candidate)
     }
 
     pc.onconnectionstatechange = () => {
       if (
         pc.connectionState === 'failed' ||
-        pc.connectionState === 'closed' ||
-        pc.connectionState === 'disconnected'
+        pc.connectionState === 'closed'
       ) {
         pc.close()
         peersRef.current.delete(viewerId)
@@ -154,22 +146,15 @@ export function SharePublisher() {
     )
   }, [])
 
-  const onSignal = useCallback(
-    async (from: string, data: SignalPayload) => {
-      const pc = peersRef.current.get(from)
-      if (!pc) return
-      if (data.type === 'answer') {
-        await pc.setRemoteDescription(data.sdp)
-      } else if (data.type === 'ice' && data.candidate) {
-        try {
-          await pc.addIceCandidate(data.candidate)
-        } catch {
-          /* ignore late ice */
-        }
-      }
-    },
-    [],
-  )
+  const onSignal = useCallback(async (from: string, data: SignalPayload) => {
+    const handle = peersRef.current.get(from)
+    if (!handle) return
+    if (data.type === 'answer') {
+      await handle.setRemote(data.sdp)
+    } else if (data.type === 'ice') {
+      await handle.addIce(data.candidate)
+    }
+  }, [])
 
   const startSharing = async () => {
     setError(null)
@@ -178,6 +163,7 @@ export function SharePublisher() {
       return
     }
     try {
+      iceServersRef.current = await resolveIceServers()
       await startCamera(facing)
 
       const ws = new WebSocket(liveWsUrl())
@@ -211,8 +197,8 @@ export function SharePublisher() {
         } else if (msg.type === 'viewer-joined') {
           void createPeerForViewer(msg.viewerId)
         } else if (msg.type === 'viewer-left') {
-          const pc = peersRef.current.get(msg.viewerId)
-          pc?.close()
+          const peer = peersRef.current.get(msg.viewerId)
+          peer?.pc.close()
           peersRef.current.delete(msg.viewerId)
           setViewers(peersRef.current.size)
         } else if (msg.type === 'signal') {
@@ -265,8 +251,8 @@ export function SharePublisher() {
       <div>
         <h2 className="font-medium">Bagikan dari HP kamu</h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Stream WebRTC ~30 fps ke penonton (bukan potongan JPEG). Butuh API +
-          jaringan yang mengizinkan peer connection (STUN).
+          Stream WebRTC ~30 fps. Di internet publik biasanya perlu TURN di
+          server (kalau hitam di production, itu penyebabnya).
         </p>
       </div>
 
@@ -304,7 +290,9 @@ export function SharePublisher() {
       ) : null}
       {sharing ? (
         <p className="flex flex-wrap items-center gap-3 text-xs text-[var(--accent)]">
-          <span>Live WebRTC{sessionId ? ` · ${sessionId.slice(0, 6)}` : ''}</span>
+          <span>
+            Live WebRTC{sessionId ? ` · ${sessionId.slice(0, 6)}` : ''}
+          </span>
           <span className="inline-flex items-center gap-1">
             <Users size={12} aria-hidden />
             {viewers} penonton

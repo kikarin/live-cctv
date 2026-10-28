@@ -18,6 +18,7 @@ import {
   publishFrame,
   publishFrameBinary,
 } from './live-share.js'
+import { getIceServers } from './ice.js'
 import {
   handleWebrtcClose,
   handleWebrtcMessage,
@@ -207,6 +208,16 @@ app.get('/api/live', async (c) => {
     ...legacy.map((s) => ({ ...s, mode: 'jpeg' as const, viewers: 0 })),
   ]
   return c.json({ sessions })
+})
+
+app.get('/api/live/ice', (c) => {
+  const iceServers = getIceServers()
+  const hasTurn = iceServers.some((s) => {
+    const u = s.urls
+    const list = Array.isArray(u) ? u : [u]
+    return list.some((x) => x.startsWith('turn:') || x.startsWith('turns:'))
+  })
+  return c.json({ iceServers, hasTurn })
 })
 
 app.get(

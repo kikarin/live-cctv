@@ -14,6 +14,34 @@ export const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ]
 
+export type IceConfig = {
+  iceServers: RTCIceServer[]
+  hasTurn: boolean
+}
+
+/** STUN (+ TURN bila diset di server). */
+export async function fetchIceConfig(
+  signal?: AbortSignal,
+): Promise<IceConfig> {
+  const res = await fetch(`${apiBase()}/api/live/ice`, { signal })
+  if (!res.ok) return { iceServers: ICE_SERVERS, hasTurn: false }
+  const data = (await res.json()) as {
+    iceServers?: RTCIceServer[]
+    hasTurn?: boolean
+  }
+  return {
+    iceServers: data.iceServers?.length ? data.iceServers : ICE_SERVERS,
+    hasTurn: Boolean(data.hasTurn),
+  }
+}
+
+export async function fetchIceServers(
+  signal?: AbortSignal,
+): Promise<RTCIceServer[]> {
+  const cfg = await fetchIceConfig(signal)
+  return cfg.iceServers
+}
+
 async function parseJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))

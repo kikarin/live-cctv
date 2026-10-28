@@ -169,7 +169,32 @@ HTTP → HTTPS redirect sesuai kebiasaanmu.
 - [ ] CORS: jika frontend & API beda origin, pastikan origin FE diizinkan (saat ini API memakai `origin: *` — pertimbangkan ketatkan)
 - [ ] Firewall: hanya 80/443 publik; Redis & `:8787` **jangan** expose ke internet
 - [ ] Restart policy (systemd/PM2/Docker) untuk API + Redis
-- [ ] Share Demo = **WebRTC P2P** (signaling lewat API). Kalau HP/viewer beda NAT ketat dan gagal connect, sediakan TURN server
+- [ ] Share Demo = **WebRTC P2P** (signaling lewat API)
+- [ ] `GET /api/live/ice` → `"hasTurn": true` (kalau `false`, layar sering **hitam** di domain publik meski local aman)
+- [ ] Firewall UDP/TCP **3478** (dan rentang relay coturn bila dipakai) terbuka ke publik
+
+## WebRTC hitam di production (local aman)
+
+Penyebab tipikal: signaling WSS oke, tapi **media P2P gagal di balik NAT**. Local pakai kandidat LAN; lewat `https://domain` butuh **TURN**.
+
+1. Pasang coturn di VPS (contoh compose profile):
+
+```bash
+TURN_USER=hivision TURN_PASS='password-kuat' TURN_REALM=cctv.summict.co.id \
+  docker compose --profile turn up -d coturn
+```
+
+2. Di `server/.env` (lalu `pm2 restart live-cctv-api --update-env`):
+
+```env
+TURN_URLS=turn:cctv.summict.co.id:3478,turn:cctv.summict.co.id:3478?transport=tcp
+TURN_USERNAME=hivision
+TURN_CREDENTIAL=password-kuat
+```
+
+3. Cek: `curl -s https://cctv.summict.co.id/api/live/ice | jq .hasTurn` → harus `true`.
+
+4. Rebuild frontend + hard refresh, share ulang dari HP.
 
 ## Share Demo di lapangan
 

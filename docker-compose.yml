@@ -8,5 +8,26 @@ services:
     command: redis-server --save 60 1 --loglevel warning
     restart: unless-stopped
 
+  # Opsional — WebRTC TURN supaya share demo tidak hitam di internet publik
+  # Jalankan: TURN_USER=hivision TURN_PASS=secret docker compose up -d coturn
+  coturn:
+    image: coturn/coturn:latest
+    network_mode: host
+    profiles: ['turn']
+    environment:
+      DETECT_EXTERNAL_IP: 'yes'
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=${TURN_USER:-hivision}:${TURN_PASS:-changeme}
+      - --realm=${TURN_REALM:-cctv.local}
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+    restart: unless-stopped
+
 volumes:
   redis_data:
