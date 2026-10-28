@@ -77,7 +77,7 @@ export async function joinLiveSession(name: string): Promise<{
   token: string
   meta: LiveSessionPublic
 }> {
-  const clean = name.trim().slice(0, 40) || 'Peserta'
+  const clean = name.trim().slice(0, 40) || 'Tanpa nama'
   const id = randomBytes(8).toString('hex')
   const token = randomBytes(16).toString('hex')
   const now = new Date().toISOString()

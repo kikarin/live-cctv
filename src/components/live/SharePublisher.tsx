@@ -30,7 +30,6 @@ export function SharePublisher() {
   const [facing, setFacing] = useState<'user' | 'environment'>('environment')
   const [error, setError] = useState<string | null>(null)
   const [viewers, setViewers] = useState(0)
-  const [sessionId, setSessionId] = useState<string | null>(null)
 
   const stopTracks = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -61,7 +60,6 @@ export function SharePublisher() {
     closePeers()
     stopTracks()
     setSharing(false)
-    setSessionId(null)
   }, [closePeers, stopTracks])
 
   useEffect(() => {
@@ -159,7 +157,7 @@ export function SharePublisher() {
   const startSharing = async () => {
     setError(null)
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError('Browser tidak mendukung kamera.')
+      setError('Kamera tidak tersedia di browser ini.')
       return
     }
     try {
@@ -180,7 +178,7 @@ export function SharePublisher() {
         }
         ws.onerror = () => {
           window.clearTimeout(t)
-          reject(new Error('WebSocket gagal — pastikan API jalan'))
+          reject(new Error('Koneksi putus'))
         }
       })
 
@@ -192,7 +190,6 @@ export function SharePublisher() {
           return
         }
         if (msg.type === 'ready') {
-          setSessionId(msg.sessionId)
           setSharing(true)
         } else if (msg.type === 'viewer-joined') {
           void createPeerForViewer(msg.viewerId)
@@ -213,14 +210,13 @@ export function SharePublisher() {
           closePeers()
           stopTracks()
           setSharing(false)
-          setSessionId(null)
         }
       }
 
       ws.send(
         JSON.stringify({
           type: 'publisher-start',
-          name: name.trim() || 'Mahasiswa',
+          name: name.trim() || 'Tanpa nama',
         }),
       )
 
@@ -231,7 +227,7 @@ export function SharePublisher() {
       }, 10000)
     } catch (err) {
       stopSharing()
-      setError(err instanceof Error ? err.message : 'Gagal mulai share')
+      setError(err instanceof Error ? err.message : 'Gagal mulai')
     }
   }
 
@@ -242,7 +238,7 @@ export function SharePublisher() {
     try {
       await startCamera(next)
     } catch {
-      setError('Gagal ganti kamera')
+      setError('Kamera tidak bisa diganti')
     }
   }
 
@@ -251,8 +247,7 @@ export function SharePublisher() {
       <div>
         <h2 className="font-medium">Bagikan dari HP kamu</h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Stream WebRTC ~30 fps. Di internet publik biasanya perlu TURN di
-          server (kalau hitam di production, itu penyebabnya).
+          Izinkan kamera, lalu mulai share. Orang lain bisa lihat di tab sebelah.
         </p>
       </div>
 
@@ -262,7 +257,7 @@ export function SharePublisher() {
           value={name}
           onChange={(e) => setName(e.target.value)}
           disabled={sharing}
-          placeholder="Mis. Ilham · Bundaran HI"
+          placeholder="Nama kamu"
           className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5"
           maxLength={40}
         />
@@ -290,9 +285,7 @@ export function SharePublisher() {
       ) : null}
       {sharing ? (
         <p className="flex flex-wrap items-center gap-3 text-xs text-[var(--accent)]">
-          <span>
-            Live WebRTC{sessionId ? ` · ${sessionId.slice(0, 6)}` : ''}
-          </span>
+          <span>Sedang share</span>
           <span className="inline-flex items-center gap-1">
             <Users size={12} aria-hidden />
             {viewers} penonton

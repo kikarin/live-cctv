@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  fetchIceConfig,
   listLiveSessions,
   liveWsUrl,
   type LiveSessionPublic,
@@ -65,11 +64,11 @@ function WebrtcTile({ session }: { session: LiveSessionPublic }) {
           setStatus('connecting')
         } else if (msg.type === 'publisher-left') {
           setStatus('error')
-          setErr('Publisher stop')
+        setErr('Share sudah berhenti')
           cleanup()
-        } else if (msg.type === 'error') {
-          setStatus('error')
-          setErr(msg.error)
+      } else if (msg.type === 'error') {
+        setStatus('error')
+        setErr(msg.error)
         } else if (msg.type === 'signal') {
           void (async () => {
             const data = msg.data
@@ -108,7 +107,7 @@ function WebrtcTile({ session }: { session: LiveSessionPublic }) {
               pc.onconnectionstatechange = () => {
                 if (pc.connectionState === 'failed') {
                   setStatus('error')
-                  setErr('Koneksi WebRTC gagal — set TURN di server')
+                  setErr('Koneksi gagal')
                 }
               }
 
@@ -131,7 +130,7 @@ function WebrtcTile({ session }: { session: LiveSessionPublic }) {
       ws.onerror = () => {
         if (!cancelled) {
           setStatus('error')
-          setErr('WebSocket error')
+          setErr('Koneksi putus')
         }
       }
     })()
@@ -154,22 +153,23 @@ function WebrtcTile({ session }: { session: LiveSessionPublic }) {
         />
         {status !== 'live' ? (
           <div className="absolute inset-0 flex items-center justify-center bg-black/55 px-3 text-center text-sm text-[var(--muted)]">
-            {status === 'connecting'
-              ? 'Menyambung media…'
-              : err || 'Error'}
+            {status === 'connecting' ? 'Menyambung…' : err || 'Gagal'}
           </div>
         ) : null}
         <div className="absolute left-2 top-2 rounded border border-[var(--accent)]/40 bg-black/70 px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--accent)]">
-          {status === 'live' ? 'Live 30fps' : status === 'connecting' ? 'ICE…' : 'Error'}
+          {status === 'live'
+            ? 'Live'
+            : status === 'connecting'
+              ? '…'
+              : 'Gagal'}
         </div>
       </div>
       <div className="px-3 py-2">
         <p className="text-sm font-medium">{session.name}</p>
         <p className="text-xs text-[var(--muted)]">
-          WebRTC
           {typeof session.viewers === 'number'
-            ? ` · ${session.viewers} penonton`
-            : ''}
+            ? `${session.viewers} penonton`
+            : 'Share'}
         </p>
       </div>
     </article>
@@ -179,7 +179,6 @@ function WebrtcTile({ session }: { session: LiveSessionPublic }) {
 export function ShareViewerGrid() {
   const [sessions, setSessions] = useState<LiveSessionPublic[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [hasTurn, setHasTurn] = useState<boolean | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -192,20 +191,12 @@ export function ShareViewerGrid() {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Gagal muat sesi')
+          setError(err instanceof Error ? err.message : 'Gagal memuat')
         }
       }
     }
     void tick()
     const id = window.setInterval(() => void tick(), 2000)
-
-    void fetchIceConfig()
-      .then((cfg) => {
-        if (!cancelled) setHasTurn(cfg.hasTurn)
-      })
-      .catch(() => {
-        if (!cancelled) setHasTurn(false)
-      })
 
     return () => {
       cancelled = true
@@ -218,15 +209,8 @@ export function ShareViewerGrid() {
       <div>
         <h2 className="font-medium">Yang lagi share sekarang</h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Video peer-to-peer WebRTC (~30 fps).
+          Feed dari HP yang sedang share.
         </p>
-        {hasTurn === false ? (
-          <p className="mt-2 text-sm text-[var(--warning)]">
-            Server belum pakai TURN. Di internet publik layar sering hitam
-            meski local aman — set <code>TURN_*</code> di API (lihat{' '}
-            <code>docs/DEPLOY.md</code>).
-          </p>
-        ) : null}
       </div>
       {error ? (
         <p className="text-sm text-[var(--warning)]">{error}</p>

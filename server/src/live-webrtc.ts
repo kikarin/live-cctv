@@ -97,14 +97,14 @@ export function handleWebrtcMessage(ws: WsLike, raw: string) {
   try {
     msg = JSON.parse(raw) as Record<string, unknown>
   } catch {
-    send(ws, { type: 'error', error: 'Invalid JSON' })
+    send(ws, { type: 'error', error: 'Pesan tidak valid' })
     return
   }
 
   const type = String(msg.type ?? '')
 
   if (type === 'publisher-start') {
-    const name = String(msg.name ?? 'Peserta').trim().slice(0, 40) || 'Peserta'
+    const name = String(msg.name ?? 'Tanpa nama').trim().slice(0, 40) || 'Tanpa nama'
     const sessionId = randomBytes(8).toString('hex')
     const peerId = randomBytes(4).toString('hex')
     const peer: Peer = {
@@ -131,7 +131,7 @@ export function handleWebrtcMessage(ws: WsLike, raw: string) {
     const sessionId = String(msg.sessionId ?? '')
     const room = rooms.get(sessionId)
     if (!room?.publisher) {
-      send(ws, { type: 'error', error: 'Sesi tidak ditemukan / publisher offline' })
+      send(ws, { type: 'error', error: 'Share tidak ditemukan' })
       return
     }
     const peerId = randomBytes(4).toString('hex')
@@ -168,12 +168,12 @@ export function handleWebrtcMessage(ws: WsLike, raw: string) {
   if (type === 'signal') {
     const peer = peerByWs.get((ws.raw ?? ws) as object)
     if (!peer) {
-      send(ws, { type: 'error', error: 'Belum join' })
+      send(ws, { type: 'error', error: 'Belum terhubung' })
       return
     }
     const room = rooms.get(peer.sessionId)
     if (!room) {
-      send(ws, { type: 'error', error: 'Room hilang' })
+      send(ws, { type: 'error', error: 'Share sudah tutup' })
       return
     }
 
@@ -189,7 +189,7 @@ export function handleWebrtcMessage(ws: WsLike, raw: string) {
     }
 
     if (!target) {
-      send(ws, { type: 'error', error: 'Peer tujuan tidak ada' })
+      send(ws, { type: 'error', error: 'Penerima tidak ada' })
       return
     }
 
@@ -207,7 +207,7 @@ export function handleWebrtcMessage(ws: WsLike, raw: string) {
     return
   }
 
-  send(ws, { type: 'error', error: `Unknown type: ${type}` })
+  send(ws, { type: 'error', error: 'Perintah tidak dikenali' })
 }
 
 export function handleWebrtcClose(ws: WsLike) {

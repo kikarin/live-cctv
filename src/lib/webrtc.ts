@@ -87,8 +87,8 @@ export function watchMediaFlow(
         window.clearInterval(id)
         onStuck(
           ice === 'failed' || conn === 'failed'
-            ? 'ICE gagal (NAT). Set TURN di server — lihat docs/DEPLOY.md'
-            : 'Video tidak mengalir. Biasanya perlu TURN di production.',
+            ? 'Koneksi gagal'
+            : 'Video belum masuk',
         )
       }
     })
